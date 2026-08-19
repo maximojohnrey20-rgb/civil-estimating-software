@@ -4,196 +4,963 @@ from pathlib import Path
 from io import BytesIO
 from datetime import datetime
 
-st.set_page_config(page_title="Civil Estimating Software", page_icon="🏗️")
+st.set_page_config(
+    page_title="Civil Estimating Software",
+    page_icon="🏗️",
+    layout="wide"
+)
+
 st.title("🏗️ Civil Estimating Software")
-st.caption("Version 3 — BNI Productivity + Crew + Excel/PDF Output")
+st.caption("Version 4 — BNI Productivity + Estimate Builder")
 
 DB = Path(__file__).parent / "construction_costs_pages_16_to_36.xlsx"
 
+
+# ============================================================
+# DATABASE
+# ============================================================
+
 @st.cache_data
 def load_db(source):
+
     df = pd.read_excel(source)
+
     df.columns = [str(c).strip() for c in df.columns]
-    required = ["CSI Code", "Item Code", "Description", "Unit", "Manhr/Unit", "Page"]
+
+    required = [
+        "CSI Code",
+        "Item Code",
+        "Description",
+        "Unit",
+        "Manhr/Unit",
+        "Page"
+    ]
+
     missing = [c for c in required if c not in df.columns]
+
     if missing:
-        raise ValueError("Missing columns: " + ", ".join(missing))
+        raise ValueError(
+            "Missing columns: " + ", ".join(missing)
+        )
+
     df = df[required].copy()
-    for c in ["CSI Code", "Item Code", "Description", "Unit"]:
-        df[c] = df[c].fillna("").astype(str).str.strip()
-    df["Manhr/Unit"] = pd.to_numeric(df["Manhr/Unit"], errors="coerce")
+
+    for c in [
+        "CSI Code",
+        "Item Code",
+        "Description",
+        "Unit"
+    ]:
+        df[c] = (
+            df[c]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+    df["Manhr/Unit"] = pd.to_numeric(
+        df["Manhr/Unit"],
+        errors="coerce"
+    )
+
     return df
 
-def make_excel(project, item, quantity, crew, total_mh, crew_hours, days):
-    rows = [
-        ["CIVIL ESTIMATING SOFTWARE — ESTIMATE OUTPUT", ""],
-        ["Project", project],
-        ["Date", datetime.now().strftime("%Y-%m-%d %H:%M")],
-        ["", ""],
-        ["SELECTED BNI ITEM", ""],
-        ["CSI Code", item["CSI Code"]],
-        ["Item Code", item["Item Code"]],
-        ["Description", item["Description"]],
-        ["Unit", item["Unit"]],
-        ["BNI Manhr/Unit", float(item["Manhr/Unit"])],
-        ["BNI Page", item["Page"]],
-        ["Quantity", quantity],
-        ["Total Man-Hours", total_mh],
-        ["Crew Hours", crew_hours],
-        ["Estimated Working Days", days],
-        ["", ""],
-        ["CREW", ""],
-        ["Position", "Quantity"],
-    ]
-    rows += [[position, qty] for position, qty in crew.items()]
-    out = BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        pd.DataFrame(rows).to_excel(writer, index=False, header=False, sheet_name="Estimate")
-    out.seek(0)
-    return out.getvalue()
 
-def make_pdf(project, item, quantity, crew, total_mh, crew_hours, days):
-    from reportlab.lib.pagesizes import letter
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib.units import inch
-    out = BytesIO()
-    doc = SimpleDocTemplate(out, pagesize=letter, rightMargin=.6*inch, leftMargin=.6*inch)
-    styles = getSampleStyleSheet()
-    story = [
-        Paragraph("CIVIL ESTIMATING SOFTWARE", styles["Title"]),
-        Paragraph("Estimate / Productivity Report", styles["Heading2"]),
-        Paragraph(f"<b>Project:</b> {project}", styles["Normal"]),
-        Paragraph(f"<b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]),
-        Spacer(1, 12),
-        Paragraph("BNI PRODUCTIVITY", styles["Heading2"])
-    ]
-    data = [
-        ["CSI Code", str(item["CSI Code"])],
-        ["Item Code", str(item["Item Code"])],
-        ["Description", str(item["Description"])],
-        ["Unit", str(item["Unit"])],
-        ["Quantity", f'{quantity:,.2f} {item["Unit"]}'],
-        ["BNI Manhr/Unit", f'{float(item["Manhr/Unit"]):.4f} MH/{item["Unit"]}'],
-        ["BNI Page", str(item["Page"])],
-        ["Total Man-Hours", f"{total_mh:,.2f} MH"],
-        ["Crew Hours", f"{crew_hours:,.2f} hours"],
-        ["Estimated Working Days", f"{days:,.2f} days"],
-    ]
-    table = Table(data, colWidths=[1.8*inch, 4.8*inch])
-    table.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.5,colors.grey),
-                               ("BACKGROUND",(0,0),(0,-1),colors.whitesmoke),
-                               ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold")]))
-    story += [table, Spacer(1,12), Paragraph("CREW", styles["Heading2"])]
-    crew_table = Table([["Position","Quantity"]] + [[p,str(q)] for p,q in crew.items()])
-    crew_table.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.5,colors.grey),
-                                    ("BACKGROUND",(0,0),(-1,0),colors.whitesmoke)]))
-    story += [crew_table, Spacer(1,12),
-              Paragraph("Total Man-Hours = Quantity × BNI Manhr/Unit", styles["Normal"]),
-              Paragraph("Crew Hours = Total Man-Hours ÷ Total Crew Members", styles["Normal"]),
-              Paragraph("Working Days = Crew Hours ÷ Hours per Workday", styles["Normal"]),
-              Spacer(1,10),
-              Paragraph("Verify the applicable productivity rate against your licensed BNI Costbook before bidding.", styles["Italic"])]
-    doc.build(story)
-    out.seek(0)
-    return out.getvalue()
+# ============================================================
+# EXCEL EXPORT
+# ============================================================
+
+def make_excel(project, estimate_items, workday_hours):
+
+    output = BytesIO()
+
+    rows = []
+
+    for number, item in enumerate(
+        estimate_items,
+        start=1
+    ):
+
+        rows.append({
+
+            "Line": number,
+
+            "CSI Code":
+                item["CSI Code"],
+
+            "Item Code":
+                item["Item Code"],
+
+            "Description":
+                item["Description"],
+
+            "Quantity":
+                item["Quantity"],
+
+            "Unit":
+                item["Unit"],
+
+            "BNI MH/Unit":
+                item["Manhr/Unit"],
+
+            "BNI Page":
+                item["Page"],
+
+            "Foreman":
+                item["Foreman"],
+
+            "Laborer":
+                item["Laborer"],
+
+            "Equipment Operator":
+                item["Equipment Operator"],
+
+            "Total Crew":
+                item["Total Crew"],
+
+            "Total Man-Hours":
+                item["Total MH"],
+
+            "Crew Hours":
+                item["Crew Hours"],
+
+            "Working Days":
+                item["Days"]
+        })
+
+    estimate_df = pd.DataFrame(rows)
+
+    summary_df = pd.DataFrame({
+
+        "Project": [project],
+
+        "Date": [
+            datetime.now().strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        ],
+
+        "Number of Items": [
+            len(estimate_items)
+        ],
+
+        "Total Man-Hours": [
+            sum(
+                x["Total MH"]
+                for x in estimate_items
+            )
+        ],
+
+        "Total Crew Hours": [
+            sum(
+                x["Crew Hours"]
+                for x in estimate_items
+            )
+        ],
+
+        "Total Working Days": [
+            sum(
+                x["Days"]
+                for x in estimate_items
+            )
+        ]
+    })
+
+    bni_df = pd.DataFrame([
+
+        {
+
+            "Line": number,
+
+            "CSI Code":
+                item["CSI Code"],
+
+            "Item Code":
+                item["Item Code"],
+
+            "Description":
+                item["Description"],
+
+            "Unit":
+                item["Unit"],
+
+            "Quantity":
+                item["Quantity"],
+
+            "BNI MH/Unit":
+                item["Manhr/Unit"],
+
+            "BNI Page":
+                item["Page"]
+
+        }
+
+        for number, item
+        in enumerate(
+            estimate_items,
+            start=1
+        )
+
+    ])
+
+    crew_df = pd.DataFrame([
+
+        {
+
+            "Line": number,
+
+            "Description":
+                item["Description"],
+
+            "Foreman":
+                item["Foreman"],
+
+            "Laborer":
+                item["Laborer"],
+
+            "Equipment Operator":
+                item["Equipment Operator"],
+
+            "Total Crew":
+                item["Total Crew"]
+
+        }
+
+        for number, item
+        in enumerate(
+            estimate_items,
+            start=1
+        )
+
+    ])
+
+    notes_df = pd.DataFrame({
+
+        "Notes": [
+
+            "BNI productivity source used.",
+
+            "Total Man-Hours = Quantity × BNI Manhr/Unit.",
+
+            "Crew Hours = Total Man-Hours ÷ Total Crew.",
+
+            "Working Days = Crew Hours ÷ Hours per Workday.",
+
+            "Verify BNI productivity against the applicable licensed BNI Costbook before bidding."
+
+        ]
+
+    })
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        summary_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Summary"
+        )
+
+        estimate_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Estimate"
+        )
+
+        bni_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="BNI Productivity"
+        )
+
+        crew_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Crew"
+        )
+
+        notes_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Notes"
+        )
+
+    output.seek(0)
+
+    return output.getvalue()
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 
 with st.sidebar:
-    st.header("BNI Database")
-    uploaded = st.file_uploader("Upload/replace productivity Excel", type=["xlsx"])
+
+    st.header("Project")
+
+    project = st.text_input(
+        "Project Name",
+        "My Civil Construction Project"
+    )
+
+    workday_hours = st.number_input(
+        "Hours per Workday",
+        min_value=1.0,
+        value=8.0,
+        step=0.5
+    )
+
     st.divider()
-    project = st.text_input("Project name", "My Civil Construction Project")
-    workday_hours = st.number_input("Hours per workday", min_value=1.0, value=8.0, step=.5)
+
+    st.header("BNI Database")
+
+    uploaded = st.file_uploader(
+        "Upload BNI productivity Excel",
+        type=["xlsx"]
+    )
+
+
+# ============================================================
+# LOAD DATABASE
+# ============================================================
 
 try:
+
     if uploaded:
+
         df = load_db(uploaded)
+
     elif DB.exists():
+
         df = load_db(DB)
+
     else:
-        st.warning("Upload the BNI Excel database in the sidebar.")
+
+        st.warning(
+            "Upload the BNI Excel database."
+        )
+
         st.stop()
+
 except Exception as e:
-    st.error(f"Could not load database: {e}")
+
+    st.error(
+        f"Could not load database: {e}"
+    )
+
     st.stop()
 
-st.success(f"Database loaded: {len(df):,} rows")
+
+st.success(
+    f"Database loaded: {len(df):,} rows"
+)
+
+
+# ============================================================
+# ESTIMATE MEMORY
+# ============================================================
+
+if "estimate_items" not in st.session_state:
+
+    st.session_state.estimate_items = []
+
+
+# ============================================================
+# SEARCH BNI
+# ============================================================
+
 st.divider()
 
-st.subheader("1. Find a BNI Item")
-q = st.text_input("Search description, CSI code, item code, or unit",
-                  placeholder="Example: concrete, asphalt, pipe, 03-30")
+st.subheader(
+    "1. Find a BNI Item"
+)
+
+search = st.text_input(
+
+    "Search description, CSI code, item code, or unit",
+
+    placeholder=
+    "Example: asphalt, concrete, pipe"
+
+)
+
+
 matches = df.copy()
-if q.strip():
-    q = q.lower().strip()
+
+
+if search.strip():
+
+    q = search.lower().strip()
+
     matches = matches[
-        matches["Description"].str.lower().str.contains(q, na=False) |
-        matches["CSI Code"].str.lower().str.contains(q, na=False) |
-        matches["Item Code"].str.lower().str.contains(q, na=False) |
-        matches["Unit"].str.lower().str.contains(q, na=False)]
-matches = matches[matches["Manhr/Unit"].notna()]
-if matches.empty:
-    st.info("No matching items with a Manhr/Unit value were found.")
-    st.stop()
+
+        matches["Description"]
+        .str.lower()
+        .str.contains(
+            q,
+            na=False
+        )
+
+        |
+
+        matches["CSI Code"]
+        .str.lower()
+        .str.contains(
+            q,
+            na=False
+        )
+
+        |
+
+        matches["Item Code"]
+        .str.lower()
+        .str.contains(
+            q,
+            na=False
+        )
+
+        |
+
+        matches["Unit"]
+        .str.lower()
+        .str.contains(
+            q,
+            na=False
+        )
+
+    ]
+
+
+matches = matches[
+    matches["Manhr/Unit"].notna()
+]
+
 
 matches = matches.head(200)
-options = {idx: f'{r["Description"]} | {r["Unit"]} | {r["Manhr/Unit"]:.4f} MH/{r["Unit"]} | {r["CSI Code"]} | {r["Item Code"]}'
-           for idx,r in matches.iterrows()}
-selected = st.selectbox("Select the item", list(options), format_func=lambda x: options[x])
+
+
+if matches.empty:
+
+    st.info(
+        "No matching BNI items found."
+    )
+
+    st.stop()
+
+
+options = {
+
+    index:
+
+    f'{row["Description"]} | '
+    f'{row["Unit"]} | '
+    f'{row["Manhr/Unit"]:.4f} MH/{row["Unit"]} | '
+    f'{row["CSI Code"]} | '
+    f'{row["Item Code"]}'
+
+    for index, row
+    in matches.iterrows()
+
+}
+
+
+selected = st.selectbox(
+
+    "Select BNI Item",
+
+    list(options.keys()),
+
+    format_func=
+    lambda x: options[x]
+
+)
+
+
 item = df.loc[selected]
 
-st.divider()
-st.subheader("2. Quantity")
-quantity = st.number_input("Quantity", min_value=0.0, value=500.0, step=1.0)
 
-st.subheader("3. BNI Productivity")
-c1,c2 = st.columns(2)
-c1.metric("Manhr / Unit", f'{item["Manhr/Unit"]:.4f}')
-c2.metric("BNI Page", str(item["Page"]))
-st.write(f'**Description:** {item["Description"]}')
-st.caption(f'CSI: {item["CSI Code"]}  •  Item Code: {item["Item Code"]}')
+# ============================================================
+# QUANTITY
+# ============================================================
 
 st.divider()
-st.subheader("4. Crew")
-crew = {}
-for position, default in [("Foreman",1),("Laborer",2),("Equipment Operator",1)]:
-    crew[position] = st.number_input(position, min_value=0, value=default, step=1)
-total_crew = sum(crew.values())
 
-if st.button("CALCULATE ESTIMATE", type="primary", use_container_width=True):
+st.subheader(
+    "2. Quantity"
+)
+
+
+quantity = st.number_input(
+
+    f'Quantity ({item["Unit"]})',
+
+    min_value=0.0,
+
+    value=500.0,
+
+    step=1.0
+
+)
+
+
+# ============================================================
+# PRODUCTIVITY
+# ============================================================
+
+st.subheader(
+    "3. BNI Productivity"
+)
+
+
+c1, c2, c3 = st.columns(3)
+
+
+c1.metric(
+
+    "Manhr / Unit",
+
+    f'{item["Manhr/Unit"]:.4f}'
+
+)
+
+
+c2.metric(
+
+    "BNI Page",
+
+    str(item["Page"])
+
+)
+
+
+c3.metric(
+
+    "Unit",
+
+    str(item["Unit"])
+
+)
+
+
+st.write(
+    f'**Description:** '
+    f'{item["Description"]}'
+)
+
+
+st.caption(
+
+    f'CSI: {item["CSI Code"]} '
+    f'• Item Code: {item["Item Code"]}'
+
+)
+
+
+# ============================================================
+# CREW
+# ============================================================
+
+st.divider()
+
+st.subheader(
+    "4. Crew"
+)
+
+
+c1, c2, c3 = st.columns(3)
+
+
+with c1:
+
+    foreman = st.number_input(
+        "Foreman",
+        min_value=0,
+        value=1,
+        step=1
+    )
+
+
+with c2:
+
+    laborer = st.number_input(
+        "Laborer",
+        min_value=0,
+        value=2,
+        step=1
+    )
+
+
+with c3:
+
+    operator = st.number_input(
+        "Equipment Operator",
+        min_value=0,
+        value=1,
+        step=1
+    )
+
+
+total_crew = (
+    foreman +
+    laborer +
+    operator
+)
+
+
+# ============================================================
+# CALCULATE
+# ============================================================
+
+if st.button(
+
+    "CALCULATE ITEM",
+
+    type="primary",
+
+    use_container_width=True
+
+):
+
     if total_crew <= 0:
-        st.error("Enter at least one crew member.")
-        st.stop()
-    total_mh = quantity * float(item["Manhr/Unit"])
-    crew_hours = total_mh / total_crew
-    days = crew_hours / workday_hours
+
+        st.error(
+            "Enter at least one crew member."
+        )
+
+    elif quantity <= 0:
+
+        st.error(
+            "Enter a quantity greater than zero."
+        )
+
+    else:
+
+        total_mh = (
+
+            quantity *
+            float(
+                item["Manhr/Unit"]
+            )
+
+        )
+
+        crew_hours = (
+            total_mh /
+            total_crew
+        )
+
+        days = (
+            crew_hours /
+            workday_hours
+        )
+
+        st.session_state.current_item = {
+
+            "CSI Code":
+                str(item["CSI Code"]),
+
+            "Item Code":
+                str(item["Item Code"]),
+
+            "Description":
+                str(item["Description"]),
+
+            "Quantity":
+                float(quantity),
+
+            "Unit":
+                str(item["Unit"]),
+
+            "Manhr/Unit":
+                float(item["Manhr/Unit"]),
+
+            "Page":
+                str(item["Page"]),
+
+            "Foreman":
+                int(foreman),
+
+            "Laborer":
+                int(laborer),
+
+            "Equipment Operator":
+                int(operator),
+
+            "Total Crew":
+                int(total_crew),
+
+            "Total MH":
+                float(total_mh),
+
+            "Crew Hours":
+                float(crew_hours),
+
+            "Days":
+                float(days)
+
+        }
+
+
+# ============================================================
+# CURRENT RESULT
+# ============================================================
+
+if "current_item" in st.session_state:
+
+    current = (
+        st.session_state.current_item
+    )
+
 
     st.divider()
-    st.subheader("Result")
-    r1,r2,r3 = st.columns(3)
-    r1.metric("Total Man-Hours", f"{total_mh:,.2f} MH")
-    r2.metric("Crew Hours", f"{crew_hours:,.2f} hr")
-    r3.metric("Working Days", f"{days:,.2f}")
 
-    st.code(f"Man-Hours = {quantity:,.2f} × {item['Manhr/Unit']:.4f} = {total_mh:,.2f} MH\n"
-            f"Crew Hours = {total_mh:,.2f} ÷ {total_crew} workers = {crew_hours:,.2f} hr\n"
-            f"Working Days = {crew_hours:,.2f} ÷ {workday_hours:.2f} hr/day = {days:,.2f} days")
+    st.subheader(
+        "Result"
+    )
 
-    st.divider()
-    st.subheader("5. Export")
-    excel_bytes = make_excel(project,item,quantity,crew,total_mh,crew_hours,days)
-    pdf_bytes = make_pdf(project,item,quantity,crew,total_mh,crew_hours,days)
-    e1,e2 = st.columns(2)
-    with e1:
-        st.download_button("📊 Download Excel Estimate", excel_bytes,
-                           "civil_estimate_output.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
-    with e2:
-        st.download_button("📄 Download PDF Report", pdf_bytes,
-                           "civil_estimate_report.pdf", "application/pdf",
-                           use_container_width=True)
+
+    r1, r2, r3 = st.columns(3)
+
+
+    r1.metric(
+        "Total Man-Hours",
+        f'{current["Total MH"]:,.2f} MH'
+    )
+
+
+    r2.metric(
+        "Crew Hours",
+        f'{current["Crew Hours"]:,.2f} hr'
+    )
+
+
+    r3.metric(
+        "Working Days",
+        f'{current["Days"]:,.2f}'
+    )
+
+
+    st.code(
+
+        f'Man-Hours = '
+        f'{current["Quantity"]:,.2f} × '
+        f'{current["Manhr/Unit"]:.4f} = '
+        f'{current["Total MH"]:,.2f} MH\n\n'
+
+        f'Crew Hours = '
+        f'{current["Total MH"]:,.2f} ÷ '
+        f'{current["Total Crew"]} workers = '
+        f'{current["Crew Hours"]:,.2f} hr\n\n'
+
+        f'Working Days = '
+        f'{current["Crew Hours"]:,.2f} ÷ '
+        f'{workday_hours:.2f} hr/day = '
+        f'{current["Days"]:,.2f} days'
+
+    )
+
+
+    if st.button(
+
+        "➕ ADD ITEM TO ESTIMATE",
+
+        use_container_width=True
+
+    ):
+
+        st.session_state.estimate_items.append(
+            current.copy()
+        )
+
+        st.success(
+            f'{current["Description"]} '
+            'was added to the estimate.'
+        )
+
+
+# ============================================================
+# ESTIMATE BUILDER
+# ============================================================
 
 st.divider()
-st.caption("Next: multiple estimate line items, labor/equipment/material pricing, markups, and full bid-sheet export.")
+
+st.subheader(
+    "5. Estimate Builder"
+)
+
+
+estimate_items = (
+    st.session_state.estimate_items
+)
+
+
+if estimate_items:
+
+    table = pd.DataFrame([
+
+        {
+
+            "Line":
+                number,
+
+            "Item Code":
+                x["Item Code"],
+
+            "Description":
+                x["Description"],
+
+            "Qty":
+                x["Quantity"],
+
+            "Unit":
+                x["Unit"],
+
+            "BNI MH/Unit":
+                x["Manhr/Unit"],
+
+            "Total MH":
+                x["Total MH"],
+
+            "Crew Hrs":
+                x["Crew Hours"],
+
+            "Days":
+                x["Days"]
+
+        }
+
+        for number, x
+        in enumerate(
+            estimate_items,
+            start=1
+        )
+
+    ])
+
+
+    st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+    total_mh = sum(
+        x["Total MH"]
+        for x in estimate_items
+    )
+
+
+    total_hours = sum(
+        x["Crew Hours"]
+        for x in estimate_items
+    )
+
+
+    total_days = sum(
+        x["Days"]
+        for x in estimate_items
+    )
+
+
+    c1, c2, c3 = st.columns(3)
+
+
+    c1.metric(
+        "Items",
+        len(estimate_items)
+    )
+
+
+    c2.metric(
+        "Total Man-Hours",
+        f"{total_mh:,.2f}"
+    )
+
+
+    c3.metric(
+        "Total Crew Hours",
+        f"{total_hours:,.2f}"
+    )
+
+
+    if st.button(
+        "🗑️ CLEAR ESTIMATE",
+        use_container_width=True
+    ):
+
+        st.session_state.estimate_items = []
+
+        st.session_state.pop(
+            "current_item",
+            None
+        )
+
+        st.rerun()
+
+
+else:
+
+    st.info(
+
+        "Your estimate is empty. "
+        "Calculate an item above and "
+        "click ADD ITEM TO ESTIMATE."
+
+    )
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+st.divider()
+
+st.subheader(
+    "6. Export"
+)
+
+
+if estimate_items:
+
+    excel = make_excel(
+
+        project,
+
+        estimate_items,
+
+        workday_hours
+
+    )
+
+
+    st.download_button(
+
+        "📊 DOWNLOAD EXCEL ESTIMATE",
+
+        excel,
+
+        "civil_estimate.xlsx",
+
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+
+        use_container_width=True
+
+    )
+
+
+else:
+
+    st.info(
+        "Add items to the estimate before exporting."
+    )
+
+
+st.divider()
+
+st.caption(
+    "Next: labor pricing + equipment pricing + material pricing + "
+    "overhead + profit + final bid price."
+)
