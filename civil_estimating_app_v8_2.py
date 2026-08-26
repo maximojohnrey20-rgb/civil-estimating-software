@@ -242,7 +242,65 @@ with ribbon[2]:
 
 with ribbon[3]:
     st.header('Assumptions / Legacy Calc Formula Map')
-    c1,c2=st.columns(2); st.session_state.labor_sell=c1.number_input('Labor Sell Factor',1.,value=float(st.session_state.labor_sell),step=.01); st.session_state.equipment_sell=c2.number_input('Equipment Sell Factor',1.,value=float(st.session_state.equipment_sell),step=.01); st.session_state.material_tax=c1.number_input('Material Tax',0.,1.,value=float(st.session_state.material_tax),step=.01,format='%.1%%'); st.session_state.material_sell=c2.number_input('Material Sell Factor',1.,value=float(st.session_state.material_sell),step=.01); st.session_state.hauling_tax=c1.number_input('Hauling Tax',0.,1.,value=float(st.session_state.hauling_tax),step=.01,format='%.1%%'); st.session_state.hauling_sell=c2.number_input('Hauling Sell Factor',1.,value=float(st.session_state.hauling_sell),step=.01); st.session_state.hours_per_day=st.number_input('Hours / Workday',1.,value=float(st.session_state.hours_per_day),step=.5)
+    c1, c2 = st.columns(2)
+
+st.session_state.labor_sell = c1.number_input(
+    "Labor Sell Factor",
+    min_value=1.0,
+    value=float(st.session_state.labor_sell),
+    step=0.01,
+    format="%.2f"
+)
+
+st.session_state.equipment_sell = c2.number_input(
+    "Equipment Sell Factor",
+    min_value=1.0,
+    value=float(st.session_state.equipment_sell),
+    step=0.01,
+    format="%.2f"
+)
+
+st.session_state.material_tax = c1.number_input(
+    "Material Tax (%)",
+    min_value=0.0,
+    max_value=1.0,
+    value=float(st.session_state.material_tax),
+    step=0.01,
+    format="%.2f"
+)
+
+st.session_state.material_sell = c2.number_input(
+    "Material Sell Factor",
+    min_value=1.0,
+    value=float(st.session_state.material_sell),
+    step=0.01,
+    format="%.2f"
+)
+
+st.session_state.hauling_tax = c1.number_input(
+    "Hauling Tax (%)",
+    min_value=0.0,
+    max_value=1.0,
+    value=float(st.session_state.hauling_tax),
+    step=0.01,
+    format="%.2f"
+)
+
+st.session_state.hauling_sell = c2.number_input(
+    "Hauling Sell Factor",
+    min_value=1.0,
+    value=float(st.session_state.hauling_sell),
+    step=0.01,
+    format="%.2f"
+)
+
+st.session_state.hours_per_day = st.number_input(
+    "Hours / Workday",
+    min_value=1.0,
+    value=float(st.session_state.hours_per_day),
+    step=0.5,
+    format="%.1f"
+)
     st.dataframe(pd.DataFrame([['Labor','Qty × Hours × Base Rate','Cost × 1.30'],['Equipment','Qty × Hours × Base Rate','Cost × 1.30'],['Material','(Qty × Rate) + Tax + Delivery','Cost × 1.09'],['Trucking','Qty × Rate × 1.07','Cost × 1.09'],['BNI','Scope Qty × BNI Manhr/Unit','Reference hours']],columns=['Type','Cost Formula','Sell / Result']),use_container_width=True,hide_index=True)
 
 with ribbon[4]:
