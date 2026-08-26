@@ -1,256 +1,519 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
-from io import BytesIO
 from pathlib import Path
+from io import BytesIO
 from datetime import datetime
-from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title='Civil Estimating Software V7', page_icon='🏗️', layout='wide', initial_sidebar_state='expanded')
-APP_DIR = Path(__file__).parent
-DB_FILE = APP_DIR / 'civil_estimating_library.sqlite'
-DEFAULT_BNI = APP_DIR / 'construction_costs_pages_16_to_36.xlsx'
-LABOR_SELL, EQUIP_SELL, MAT_TAX, MAT_SELL, HAUL_TAX, HAUL_SELL = 1.30, 1.30, 0.09, 1.09, 0.07, 1.09
-WBS = {
-    '02 — Existing Conditions':['Demolition','Site Clearing'],
-    '31 — Earthwork':['Excavation','Backfill','Fill / Import','Grading'],
-    '32 — Exterior Improvements':['Paving','Concrete','Site Improvements','Erosion Control'],
-    '33 — Utilities':['Sewer','Storm Drainage','Water','Utility Structures']}
-TYPES=['Labor','Equipment','Material','Trucking']
-COLS=['Type','Resource','Qty','Hours','Unit','Base Rate','Tax %','Delivery','Sell Factor','Cost','Sell','Profit','Notes']
+st.set_page_config(page_title="Civil Estimating Software", page_icon="🏗️", layout="wide")
+DB_DEFAULT = Path(__file__).parent / "construction_costs_pages_16_to_36.xlsx"
+COLS = ["Type", "Resource", "Quantity", "Unit", "Rate", "Tax %", "Cost", "Charge", "Profit", "Notes"]
 
-def sf(v,d=0.0):
-    try: return d if pd.isna(v) else float(v)
-    except: return d
+st.markdown("""<style>
+#MainMenu,footer,header{visibility:hidden}
+.block-container{padding-top:.6rem;max-width:1500px}
+.appbar{background:#1f4e78;color:white;padding:14px 18px;border-radius:6px;margin-bottom:8px}
+.appbar-title{font-size:24px;font-weight:700}.appbar-sub{font-size:12px}
+.step{background:#eaf2f8;border:1px solid #c8d9e6;border-radius:5px;padding:8px 11px;margin:8px 0;font-weight:650}
+.help{background:#fff8e1;border:1px solid #f0d98c;border-radius:6px;padding:11px}
+.total{background:#e2f0d9;border:1px solid #a9d18e;border-radius:6px;padding:12px}
+</style>""", unsafe_allow_html=True)
 
-def conn():
-    c=sqlite3.connect(DB_FILE)
-    c.execute('''CREATE TABLE IF NOT EXISTS rates(id INTEGER PRIMARY KEY, type TEXT, resource TEXT, unit TEXT, rate REAL, notes TEXT, updated TEXT, UNIQUE(type,resource))''')
-    c.commit(); return c
+def blank_resources():
+    return pd.DataFrame(columns=COLS)
 
-def rate_save(typ,res,unit,rate,notes=''):
-    if not str(res).strip(): return
-    c=conn(); c.execute('''INSERT INTO rates(type,resource,unit,rate,notes,updated) VALUES(?,?,?,?,?,?) ON CONFLICT(type,resource) DO UPDATE SET unit=excluded.unit,rate=excluded.rate,notes=excluded.notes,updated=excluded.updated''',(typ,str(res).strip(),str(unit or ''),sf(rate),str(notes or ''),datetime.now().isoformat(timespec='seconds'))); c.commit(); c.close()
+def init():
+    defaults = {
+        "tasks": [], 
+        "active_id": None,
+        "project_name": "My Civil Construction Project", 
+        "estimator": "",
+        "bni": None, 
+        "markup": 1.30,
+        "labor_sell": 1.30,
+        "equipment_sell": 1.30,
+        "material_tax": 0.09,
+        "material_sell": 1.09,
+        "hauling_tax": 0.07,
+        "hauling_sell": 1.09,
+        "hours_per_day": 8.0,
+        "labor": pd.DataFrame([["Foreman","HR",0.0],["Laborer","HR",0.0],["Equipment Operator","HR",0.0]], columns=["Resource","Unit","Rate"]),
+        "materials": pd.DataFrame([['8" PVC',"LF",0.0],['8" Sewer Tap',"EA",0.0],["Crushed Gravel","CY",0.0],["Import Fill","CY",0.0]], columns=["Resource","Unit","Rate"]),
+        "equipment": pd.DataFrame([["307.5","HR",0.0],["CTL","HR",0.0],["Excavator","HR",0.0],["Loader","HR",0.0]], columns=["Resource","Unit","Rate"]),
+        "trucking": pd.DataFrame([["Tri-Axle","HR",0.0],["Dump Truck","HR",0.0]], columns=["Resource","Unit","Rate"]),
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-def rate_table(typ=None):
-    c=conn(); q='SELECT type,resource,unit,rate,notes,updated FROM rates'; p=[]
-    if typ: q+=' WHERE type=?'; p=[typ]
-    q+=' ORDER BY type,resource'; d=pd.read_sql_query(q,c,params=p); c.close(); return d
-
-def rate_lookup(typ,res):
-    d=rate_table(typ)
-    if d.empty: return None
-    m=d[d.resource.astype(str).str.lower()==str(res).strip().lower()]
-    return None if m.empty else m.iloc[0]
-
-@st.cache_data(show_spinner=False)
-def load_bni(src):
-    d=pd.read_excel(src); d.columns=[str(x).strip() for x in d.columns]
-    req=['CSI Code','Item Code','Description','Unit','Manhr/Unit','Page']; miss=[x for x in req if x not in d.columns]
-    if miss: raise ValueError('Missing BNI columns: '+', '.join(miss))
-    d=d[req].copy()
-    for c in ['CSI Code','Item Code','Description','Unit']: d[c]=d[c].fillna('').astype(str).str.strip()
-    d['Manhr/Unit']=pd.to_numeric(d['Manhr/Unit'],errors='coerce'); d['Page']=d['Page'].fillna('').astype(str); return d
-
-def blank(): return pd.DataFrame(columns=COLS)
+init()
 
 def new_task():
-    return {'id':datetime.now().timestamp(),'wbs':'33 — Utilities','category':'Sewer','description':'Installation of 2,050 LF of 8" PVC Sanitary Line','quantity':2050.0,'unit':'LF','surface':'Unpaved','depth':"0'-6'",'bni_item':'','bni_description':'','bni_page':'','bni_productivity':0.0,'resources':blank()}
+    return {
+        "id": datetime.now().timestamp(),
+        "wbs": "33 — Utilities",
+        "description": "New Estimate Item",
+        "quantity": 1.0,
+        "unit": "EA",
+        "surface": "Unpaved",
+        "depth": "",
+        "bni_productivity": 0.0,
+        "bni_page": "",
+        "bni_description": "",
+        "resources": blank_resources()
+    }
 
-def calc_row(r):
-    typ=str(r.get('Type','')).strip(); q=sf(r.get('Qty')); h=sf(r.get('Hours')); rate=sf(r.get('Base Rate')); tax=sf(r.get('Tax %')); delivery=sf(r.get('Delivery')); factor=sf(r.get('Sell Factor'))
-    if typ=='Labor': cost=q*h*rate; factor=factor or LABOR_SELL
-    elif typ=='Equipment': cost=q*h*rate; factor=factor or EQUIP_SELL
-    elif typ=='Material': tax=tax or MAT_TAX; factor=factor or MAT_SELL; cost=q*rate+(q*rate*tax)+delivery
-    elif typ=='Trucking': tax=tax or HAUL_TAX; factor=factor or HAUL_SELL; cost=q*rate*(1+tax)
-    else: cost=0; factor=1
-    sell=cost*factor; return cost,sell,sell-cost,factor,tax
-
-def calc_resources(d):
-    if d is None or d.empty: return blank()
-    d=d.copy()
-    for c in COLS:
-        if c not in d.columns: d[c]=''
-    for c in ['Type','Resource','Unit','Notes']: d[c]=d[c].fillna('').astype(str)
-    for c in ['Qty','Hours','Base Rate','Tax %','Delivery','Sell Factor']: d[c]=pd.to_numeric(d[c],errors='coerce').fillna(0.0)
-    out=[]
-    for _,r in d.iterrows():
-        typ=str(r['Type']).strip(); name=str(r['Resource']).strip()
-        if name and typ in TYPES:
-            lib=rate_lookup(typ,name)
-            if lib is not None:
-                if not str(r['Unit']).strip(): r['Unit']=lib['unit']
-                if sf(r['Base Rate'])==0: r['Base Rate']=sf(lib['rate'])
-            if typ=='Labor': r['Tax %']=0; r['Sell Factor']=sf(r['Sell Factor']) or LABOR_SELL
-            elif typ=='Equipment': r['Tax %']=0; r['Sell Factor']=sf(r['Sell Factor']) or EQUIP_SELL
-            elif typ=='Material': r['Tax %']=sf(r['Tax %']) or MAT_TAX; r['Sell Factor']=sf(r['Sell Factor']) or MAT_SELL
-            elif typ=='Trucking': r['Tax %']=sf(r['Tax %']) or HAUL_TAX; r['Sell Factor']=sf(r['Sell Factor']) or HAUL_SELL
-        cost,sell,profit,factor,tax=calc_row(r); r['Tax %']=tax; r['Sell Factor']=factor; r['Cost']=cost; r['Sell']=sell; r['Profit']=profit; out.append(r[COLS].to_dict())
-    return pd.DataFrame(out,columns=COLS)
-
-def calc_task(t):
-    t=dict(t); t['resources']=calc_resources(t.get('resources',blank())); r=t['resources']
-    vals={k:float(r.loc[r.Type==k,'Cost'].sum()) if not r.empty else 0 for k in TYPES}
-    t['labor_cost']=vals['Labor']; t['equipment_cost']=vals['Equipment']; t['material_cost']=vals['Material']; t['trucking_cost']=vals['Trucking']; t['direct_cost']=sum(vals.values()); t['total_charge']=float(r['Sell'].sum()) if not r.empty else 0; t['profit']=t['total_charge']-t['direct_cost']; t['bni_hours']=sf(t['quantity'])*sf(t['bni_productivity']); return t
-
-def save_task(t):
-    for i,x in enumerate(st.session_state.tasks):
-        if x['id']==t['id']: st.session_state.tasks[i]=t; return
-    st.session_state.tasks.append(t)
-
-def autosave_rates(d):
-    if d is None or d.empty:return
-    for _,r in d.iterrows():
-        if str(r['Type']).strip() in TYPES and str(r['Resource']).strip(): rate_save(r['Type'],r['Resource'],r['Unit'],r['Base Rate'],r['Notes'])
-
-def style(ws,fill):
-    thin=Side(style='thin',color='B7B7B7')
-    for c in ws[1]: c.fill=PatternFill('solid',fgColor=fill); c.font=Font(color='FFFFFF',bold=True); c.alignment=Alignment(horizontal='center'); c.border=Border(bottom=thin)
-    ws.freeze_panes='A2'; ws.auto_filter.ref=ws.dimensions
-    for col in ws.columns:
-        letter=get_column_letter(col[0].column); ws.column_dimensions[letter].width=min(max(max(len(str(x.value or '')) for x in col)+2,10),45)
-
-def export_xlsx():
-    tasks=[calc_task(t) for t in st.session_state.tasks]; out=BytesIO()
-    summary=[]; detail=[]; legacy=[]
-    for n,t in enumerate(tasks,1):
-        summary.append({'Line':n,'WBS':t['wbs'],'Category':t['category'],'Description':t['description'],'Quantity':t['quantity'],'Unit':t['unit'],'BNI MH/Unit':t['bni_productivity'],'BNI Page':t['bni_page'],'BNI Total MH':t['bni_hours'],'Labor':t['labor_cost'],'Equipment':t['equipment_cost'],'Materials':t['material_cost'],'Trucking':t['trucking_cost'],'Direct Cost':t['direct_cost'],'Total Bid Price':t['total_charge'],'Profit':t['profit']})
-        detail.append({'Line':n,'WBS':t['wbs'],'Description':t['description'],'Qty':t['quantity'],'Unit':t['unit'],'BNI MH/Unit':t['bni_productivity'],'BNI Hours':t['bni_hours'],'Labor':t['labor_cost'],'Equipment':t['equipment_cost'],'Materials':t['material_cost'],'Trucking':t['trucking_cost'],'Direct Cost':t['direct_cost'],'Bid Price':t['total_charge'],'Profit':t['profit']})
-        for rn,(_,r) in enumerate(t['resources'].iterrows(),1): legacy.append({'Line':n,'Resource Line':rn,'WBS':t['wbs'],'Scope':t['description'],'Type':r['Type'],'Resource':r['Resource'],'Qty':r['Qty'],'Hours':r['Hours'],'Unit':r['Unit'],'Base Rate':r['Base Rate'],'Tax %':r['Tax %'],'Delivery':r['Delivery'],'Sell Factor':r['Sell Factor'],'Cost':None,'Sell':None,'Profit':None,'Formula / Derivation':'','Notes':r['Notes']})
-    with pd.ExcelWriter(out,engine='openpyxl') as w:
-        pd.DataFrame(summary).to_excel(w,index=False,sheet_name='Bid Summary'); pd.DataFrame(detail).to_excel(w,index=False,sheet_name='Estimate Detail'); pd.DataFrame(legacy).to_excel(w,index=False,sheet_name='Legacy Calc')
-        pd.DataFrame([['Labor Sell Factor',st.session_state.labor_sell,'Cost × factor'],['Equipment Sell Factor',st.session_state.equipment_sell,'Cost × factor'],['Material Tax',st.session_state.material_tax,'Material base × tax'],['Material Sell Factor',st.session_state.material_sell,'Cost w/ tax & delivery × factor'],['Hauling Tax',st.session_state.hauling_tax,'Hauling base × tax'],['Hauling Sell Factor',st.session_state.hauling_sell,'Cost w/ tax × factor'],['Hours / Workday',st.session_state.hours_per_day,'Duration reference']],columns=['Assumption','Value','Purpose']).to_excel(w,index=False,sheet_name='Assumptions')
-    out.seek(0); wb=load_workbook(out)
-    style(wb['Bid Summary'],'1F4E78'); style(wb['Estimate Detail'],'4472C4'); style(wb['Legacy Calc'],'ED7D31'); style(wb['Assumptions'],'70AD47')
-    ws=wb['Legacy Calc']; H={str(c.value):c.column for c in ws[1]}
-    for row in range(2,ws.max_row+1):
-        typ=f'{get_column_letter(H["Type"])}{row}'; qty=f'{get_column_letter(H["Qty"])}{row}'; hrs=f'{get_column_letter(H["Hours"])}{row}'; rate=f'{get_column_letter(H["Base Rate"])}{row}'; tax=f'{get_column_letter(H["Tax %"])}{row}'; delivery=f'{get_column_letter(H["Delivery"])}{row}'; factor=f'{get_column_letter(H["Sell Factor"])}{row}'
-        ws.cell(row,H['Cost'],f'=IF({typ}="Labor",{qty}*{hrs}*{rate},IF({typ}="Equipment",{qty}*{hrs}*{rate},IF({typ}="Material",({qty}*{rate})+(({qty}*{rate})*{tax})+{delivery},IF({typ}="Trucking",{qty}*{rate}*(1+{tax}),0))))')
-        ws.cell(row,H['Sell'],f'={get_column_letter(H["Cost"])}{row}*{factor}'); ws.cell(row,H['Profit'],f'={get_column_letter(H["Sell"])}{row}-{get_column_letter(H["Cost"])}{row}')
-        ws.cell(row,H['Formula / Derivation'],f'=IF({typ}="Labor","Qty × Hours × Base Rate",IF({typ}="Equipment","Qty × Hours × Base Rate",IF({typ}="Material","(Qty × Base Rate) + Tax + Delivery",IF({typ}="Trucking","Qty × Base Rate × (1 + Tax %)",""))))')
-        for col in [H['Cost'],H['Sell'],H['Profit']]: ws.cell(row,col).number_format='$#,##0.00'
-        color={'Labor':'E2F0D9','Equipment':'D9EAF7','Material':'FCE4D6','Trucking':'FFF2CC'}.get(str(ws.cell(row,H['Type']).value),'FFFFFF')
-        for col in range(1,ws.max_column+1): ws.cell(row,col).fill=PatternFill('solid',fgColor=color)
-    for sh in ['Bid Summary','Estimate Detail','Legacy Calc']:
-        ws=wb[sh]
-        for row in ws.iter_rows():
-            for c in row:
-                if isinstance(c.value,(float,int)) and any(k in str(ws.cell(1,c.column).value or '').lower() for k in ['cost','price','sell','profit','rate','delivery']): c.number_format='$#,##0.00'
-    final=BytesIO(); wb.save(final); final.seek(0); return final.getvalue()
-
-# UI
-st.markdown('''<style>#MainMenu,header,footer{visibility:hidden}.block-container{padding-top:.4rem;max-width:1800px}.ribbon{background:#1f4e78;color:white;padding:10px 14px;border-radius:6px;margin-bottom:8px}.title{font-size:21px;font-weight:700}.sub{font-size:11px}.section{background:#eaf2f8;border-left:4px solid #1f4e78;padding:7px 10px;margin:8px 0;font-weight:700}.audit{background:#fff8e1;border:1px solid #ead38b;border-radius:6px;padding:10px}.kpi{border:1px solid #d9e2f3;border-radius:6px;padding:7px}.kpi-label{font-size:10px;color:#666}.kpi-value{font-size:18px;font-weight:700}[data-testid="stSidebar"]{min-width:290px;max-width:330px}''',unsafe_allow_html=True)
-st.markdown('<div class="ribbon"><div class="title">🏗️ Civil Estimating Software — Version 7</div><div class="sub">Sigma / Excel-style Unit Price Analysis • BNI Productivity • Resource Cost Breakdown • Bid Workbook</div></div>',unsafe_allow_html=True)
-
-if 'tasks' not in st.session_state: st.session_state.tasks=[]
-if 'active' not in st.session_state: st.session_state.active=None
-if 'bni' not in st.session_state:
-    try: st.session_state.bni=load_bni(DEFAULT_BNI) if DEFAULT_BNI.exists() else None
-    except: st.session_state.bni=None
-for k,v in {'project':'Civil Construction Estimate','estimator':'','labor_sell':LABOR_SELL,'equipment_sell':EQUIP_SELL,'material_tax':MAT_TAX,'material_sell':MAT_SELL,'hauling_tax':HAUL_TAX,'hauling_sell':HAUL_SELL,'hours_per_day':8.0}.items():
-    if k not in st.session_state: st.session_state[k]=v
-
-with st.sidebar:
-    st.markdown('## 📂 Project'); st.session_state.project=st.text_input('Project',st.session_state.project); st.session_state.estimator=st.text_input('Estimator',st.session_state.estimator)
-    if st.button('➕ NEW SCOPE ITEM',type='primary',use_container_width=True):
-        t=new_task(); st.session_state.tasks.append(t); st.session_state.active=t['id']; st.rerun()
-    st.divider(); st.markdown('### WBS / Scope Tree')
-    for master,children in WBS.items():
-        with st.expander(master,expanded=True):
-            for child in children:
-                st.caption('▸ '+child)
-                for t in st.session_state.tasks:
-                    if t['wbs']==master and t['category']==child:
-                        label=t['description'][:46]+'...' if len(t['description'])>49 else t['description']
-                        if st.button(label,key=f'tree_{t["id"]}',use_container_width=True): st.session_state.active=t['id']; st.rerun()
-
-ribbon=st.tabs(['Estimate Sheet','Bid Summary','Cost Libraries / BNi','Assumptions','Excel Export'])
-
-def current():
+def active():
     for t in st.session_state.tasks:
-        if t['id']==st.session_state.active:return t
+        if t["id"] == st.session_state.active_id:
+            return t
     return None
 
-with ribbon[0]:
-    t=current()
-    if t is None: st.info('Click **NEW SCOPE ITEM** in the sidebar to begin.')
-    else:
-        t=calc_task(t); k=st.columns(7)
-        for c,(lab,val) in zip(k,[('BNI Hours',f'{t["bni_hours"]:,.2f} MH'),('Labor',f'${t["labor_cost"]:,.2f}'),('Materials',f'${t["material_cost"]:,.2f}'),('Equipment',f'${t["equipment_cost"]:,.2f}'),('Trucking',f'${t["trucking_cost"]:,.2f}'),('Direct Cost',f'${t["direct_cost"]:,.2f}'),('Profit',f'${t["profit"]:,.2f}')]): c.metric(lab,val)
-        st.success(f'TOTAL BID PRICE / CHARGE: ${t["total_charge"]:,.2f}')
-        st.markdown('<div class="section">1. SCOPE HEADER</div>',unsafe_allow_html=True)
-        c1,c2=st.columns([2,1]); t['description']=c1.text_input('Scope Description',t['description']); cats=[x for v in WBS.values() for x in v]; t['category']=c2.selectbox('Category',cats,index=cats.index(t['category']) if t['category'] in cats else 0)
-        c1,c2,c3,c4=st.columns(4); t['quantity']=c1.number_input('Scope Quantity',min_value=0.,value=sf(t['quantity']),step=1.); units=['LF','SF','SY','CY','TON','EA','HR','DAY','LS']; t['unit']=c2.selectbox('Unit',units,index=units.index(t['unit']) if t['unit'] in units else 0); t['surface']=c3.selectbox('Surface',['Paved','Unpaved','Repaired']); t['depth']=c4.text_input('Average Depth',t['depth'])
-        masters=list(WBS); t['wbs']=st.selectbox('MasterFormat / WBS',masters,index=masters.index(t['wbs']) if t['wbs'] in masters else 3); st.caption('Depth is descriptive only in V7; no automatic excavation-depth calculator is applied.')
-        st.markdown('<div class="section">2. BNI PRODUCTIVITY</div>',unsafe_allow_html=True)
-        if st.session_state.bni is None: st.warning('Upload the BNI Excel database under Cost Libraries / BNi.')
+def save(t):
+    for i, x in enumerate(st.session_state.tasks):
+        if x["id"] == t["id"]:
+            st.session_state.tasks[i] = t
+            return
+    st.session_state.tasks.append(t)
+
+def load_bni(src):
+    df = pd.read_excel(src)
+    df.columns = [str(c).strip() for c in df.columns]
+    req = ["CSI Code", "Item Code", "Description", "Unit", "Manhr/Unit", "Page"]
+    miss = [c for c in req if c not in df.columns]
+    if miss:
+        raise ValueError("Missing columns: " + ", ".join(miss))
+    df = df[req].copy()
+    for c in ["CSI Code", "Item Code", "Description", "Unit"]:
+        df[c] = df[c].fillna("").astype(str).str.strip()
+    df["Manhr/Unit"] = pd.to_numeric(df["Manhr/Unit"], errors="coerce")
+    return df
+
+def lookup(typ, name):
+    tables = {
+        "Labor": st.session_state.labor,
+        "Material": st.session_state.materials,
+        "Equipment": st.session_state.equipment,
+        "Trucking": st.session_state.trucking
+    }
+    df = tables.get(typ)
+    if df is None or df.empty:
+        return None
+    m = df[df.Resource.astype(str).str.strip().str.lower() == name.strip().lower()]
+    return None if m.empty else m.iloc[0]
+
+def calc(df):
+    if df is None or df.empty:
+        return blank_resources()
+    df = df.copy()
+    for c in ["Type", "Resource", "Unit", "Notes"]:
+        if c not in df.columns:
+            df[c] = ""
+        df[c] = df[c].fillna("").astype(str)
+    for c in ["Quantity", "Rate", "Tax %"]:
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    
+    costs, charges, profits = [], [], []
+    for _, r in df.iterrows():
+        typ = str(r.Type).strip().lower()
+        cost = float(r.Quantity) * float(r.Rate) * (1.0 + float(r["Tax %"]))
+        
+        if typ == "labor":
+            markup_factor = st.session_state.labor_sell
+        elif typ == "equipment":
+            markup_factor = st.session_state.equipment_sell
+        elif typ == "material":
+            markup_factor = st.session_state.material_sell
+        elif typ in ["trucking", "hauling"]:
+            markup_factor = st.session_state.hauling_sell
         else:
-            b=st.session_state.bni; q=st.text_input('Search BNI',placeholder='sewer / PVC / excavation / asphalt',key=f'bq_{t["id"]}'); s=b.copy()
-            if q.strip():
-                q=q.lower().strip(); s=s[s.Description.str.lower().str.contains(q,na=False)|s['CSI Code'].str.lower().str.contains(q,na=False)|s['Item Code'].str.lower().str.contains(q,na=False)|s.Unit.str.lower().str.contains(q,na=False)]
-            s=s[s['Manhr/Unit'].notna()].head(200)
-            if not s.empty:
-                opts={i:f'{x.Description} | {x.Unit} | {x["Manhr/Unit"]:.4f} MH/{x.Unit} | Item {x["Item Code"]} | Page {x.Page}' for i,x in s.iterrows()}; ids=list(opts); sel=st.selectbox('Select BNI Item',ids,format_func=lambda x:opts[x],key=f'bsel_{t["id"]}'); br=b.loc[sel]; t['bni_item']=str(br['Item Code']); t['bni_description']=str(br['Description']); t['bni_page']=str(br['Page']); t['bni_productivity']=sf(br['Manhr/Unit']); st.markdown(f'<div class="audit"><b>BNI:</b> {t["bni_description"]} | Item {t["bni_item"]} | Page {t["bni_page"]}<br><b>Derivation:</b> {t["quantity"]:,.2f} {t["unit"]} × {t["bni_productivity"]:.4f} MH/{t["unit"]} = <b>{t["bni_hours"]:,.2f} MH</b></div>',unsafe_allow_html=True)
-        st.markdown('<div class="section">3. RESOURCE BREAKDOWN / UNIT PRICE ANALYSIS</div>',unsafe_allow_html=True)
-        res=t['resources'].copy()
-        if res.empty: res=pd.DataFrame([{'Type':'Labor','Resource':'Laborer','Qty':1.,'Hours':0.,'Unit':'HR','Base Rate':0.,'Tax %':0.,'Delivery':0.,'Sell Factor':LABOR_SELL,'Cost':0.,'Sell':0.,'Profit':0.,'Notes':''}],columns=COLS)
-        edited=st.data_editor(res,num_rows='dynamic',use_container_width=True,hide_index=True,key=f'ed_{t["id"]}',column_config={'Type':st.column_config.SelectboxColumn(options=TYPES),'Qty':st.column_config.NumberColumn(format='%.3f'),'Hours':st.column_config.NumberColumn(format='%.3f'),'Base Rate':st.column_config.NumberColumn(format='$%.2f'),'Tax %':st.column_config.NumberColumn(format='%.1%%'),'Delivery':st.column_config.NumberColumn(format='$%.2f'),'Sell Factor':st.column_config.NumberColumn(format='%.2fx'),'Cost':st.column_config.NumberColumn(disabled=True,format='$%.2f'),'Sell':st.column_config.NumberColumn(disabled=True,format='$%.2f'),'Profit':st.column_config.NumberColumn(disabled=True,format='$%.2f')})
-        t['resources']=calc_resources(edited); autosave_rates(t['resources']); t=calc_task(t)
-        st.dataframe(t['resources'],use_container_width=True,hide_index=True)
-        st.markdown('<div class="section">4. DERIVATION / AUDIT TRAIL</div>',unsafe_allow_html=True)
-        st.markdown(f'<div class="audit"><b>Direct Cost</b> = Labor + Equipment + Materials + Trucking = ${t["direct_cost"]:,.2f}<br><b>Total Bid Price</b> = Resource sell prices = ${t["total_charge"]:,.2f}<br><b>Estimated Profit</b> = Bid Price − Direct Cost = ${t["profit"]:,.2f}</div>',unsafe_allow_html=True)
-        resource_hours=sum(sf(r.Qty)*sf(r.Hours) for _,r in t['resources'].iterrows() if r.Type in ['Labor','Equipment'])
-        st.markdown('<div class="section">5. PRODUCTION / DURATION</div>',unsafe_allow_html=True); d1,d2,d3=st.columns(3); d1.metric('BNI Man-Hours',f'{t["bni_hours"]:,.2f}'); d2.metric('Resource Hours',f'{resource_hours:,.2f}'); d3.metric('Estimated Days',f'{resource_hours/st.session_state.hours_per_day:,.2f}')
-        a,b,c=st.columns(3)
-        if a.button('💾 SAVE SCOPE ITEM',type='primary',use_container_width=True): save_task(t); st.success('Saved.')
-        if b.button('📋 DUPLICATE',use_container_width=True):
-            cp=dict(t); cp['id']=datetime.now().timestamp(); cp['description']+=' — Copy'; cp['resources']=t['resources'].copy(); st.session_state.tasks.append(cp); st.session_state.active=cp['id']; st.rerun()
-        if c.button('🗑️ DELETE',use_container_width=True): st.session_state.tasks=[x for x in st.session_state.tasks if x['id']!=t['id']]; st.session_state.active=st.session_state.tasks[0]['id'] if st.session_state.tasks else None; st.rerun()
+            markup_factor = st.session_state.markup
+            
+        charge = cost * markup_factor
+        profit = charge - cost
+        
+        costs.append(cost)
+        charges.append(charge)
+        profits.append(profit)
+        
+    df["Cost"] = costs
+    df["Charge"] = charges
+    df["Profit"] = profits
+    return df[COLS]
 
-with ribbon[1]:
-    st.header('Bid Summary')
+def task_calc(t):
+    t = dict(t)
+    t["resources"] = calc(t["resources"])
+    r = t["resources"]
+    
+    def sub(k): 
+        return r.loc[r.Type.str.lower() == k.lower(), "Cost"].sum() if not r.empty else 0.0
+        
+    t["labor_cost"] = sub("Labor")
+    t["material_cost"] = sub("Material")
+    t["equipment_cost"] = sub("Equipment")
+    t["trucking_cost"] = sub("Trucking")
+    t["direct_cost"] = t["labor_cost"] + t["material_cost"] + t["equipment_cost"] + t["trucking_cost"]
+    t["total_charge"] = r["Charge"].sum() if not r.empty else 0.0
+    t["profit"] = t["total_charge"] - t["direct_cost"]
+    t["bni_hours"] = float(t["quantity"]) * float(t["bni_productivity"])
+    return t
+
+def export_xlsx():
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as w:
+        summary, resources, bni = [], [], []
+        for i, raw in enumerate(st.session_state.tasks, 1):
+            t = task_calc(raw)
+            summary.append({
+                "Line": i, "WBS": t["wbs"], "Description": t["description"],
+                "Quantity": t["quantity"], "Unit": t["unit"], "Surface": t["surface"],
+                "Depth": t["depth"], "BNI MH/Unit": t["bni_productivity"], "BNI Page": t["bni_page"],
+                "BNI Total MH": t["bni_hours"], "Labor": t["labor_cost"], "Materials": t["material_cost"],
+                "Equipment": t["equipment_cost"], "Trucking": t["trucking_cost"],
+                "Direct Cost": t["direct_cost"], "Total Charge": t["total_charge"], "Profit": t["profit"]
+            })
+            for _, r in t["resources"].iterrows():
+                resources.append({
+                    "Line": i, "Task": t["description"], "Type": r.Type, "Resource": r.Resource,
+                    "Quantity": r.Quantity, "Unit": r.Unit, "Rate": r.Rate, "Tax %": r["Tax %"],
+                    "Cost": r.Cost, "Charge": r.Charge, "Profit": r.Profit, "Notes": r.Notes
+                })
+            bni.append({
+                "Line": i, "Task": t["description"], "BNI Description": t["bni_description"],
+                "BNI Page": t["bni_page"], "Quantity": t["quantity"], "Unit": t["unit"],
+                "BNI MH/Unit": t["bni_productivity"], "Total BNI Man-Hours": t["bni_hours"],
+                "Derivation": f'{t["quantity"]:,.2f} {t["unit"]} × {t["bni_productivity"]:.4f} MH/{t["unit"]}'
+            })
+            
+        pd.DataFrame(summary).to_excel(w, index=False, sheet_name="Estimate Summary")
+        pd.DataFrame(resources).to_excel(w, index=False, sheet_name="Resource Breakdown")
+        pd.DataFrame(bni).to_excel(w, index=False, sheet_name="BNI Productivity")
+        pd.DataFrame([
+            ["Project", st.session_state.project_name],
+            ["Estimator", st.session_state.estimator],
+            ["Labor Sell Factor", st.session_state.labor_sell],
+            ["Equipment Sell Factor", st.session_state.equipment_sell],
+            ["Material Tax", st.session_state.material_tax],
+            ["Material Sell Factor", st.session_state.material_sell],
+            ["Hauling Tax", st.session_state.hauling_tax],
+            ["Hauling Sell Factor", st.session_state.hauling_sell],
+            ["Hours / Workday", st.session_state.hours_per_day]
+        ], columns=["Setting", "Value"]).to_excel(w, index=False, sheet_name="Settings")
+        
+        for name, df in [("Labor Price List", st.session_state.labor),
+                        ("Material Price List", st.session_state.materials),
+                        ("Equipment Price List", st.session_state.equipment),
+                        ("Trucking Price List", st.session_state.trucking)]:
+            df.to_excel(w, index=False, sheet_name=name)
+            
+        wb = w.book
+        fill = PatternFill("solid", fgColor="1F4E78")
+        font = Font(color="FFFFFF", bold=True)
+        for ws in wb.worksheets:
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for cell in ws[1]:
+                cell.fill = fill
+                cell.font = font
+                cell.alignment = Alignment(horizontal="center")
+            for col in ws.columns:
+                letter = get_column_letter(col[0].column)
+                ws.column_dimensions[letter].width = min(max(len(str(x.value or "")) for x in col) + 2, 45)
+                
+    out.seek(0)
+    return out.getvalue()
+
+st.markdown('<div class="appbar"><div class="appbar-title">🏗️ Civil Estimating Software</div><div class="appbar-sub">Guided Estimating Workbook • BNI Productivity • Resource Cost Analysis</div></div>', unsafe_allow_html=True)
+tabs = st.tabs(["🏠 Home", "📋 Estimate", "📚 Libraries", "📊 Reports", "📤 Export"])
+
+with tabs[0]:
+    st.header("Welcome 👋")
+    st.markdown('<div class="help"><b>Simple workflow:</b> Start → Define scope → Select BNI productivity → Add resources → Review cost → Export Excel.</div>', unsafe_allow_html=True)
+    if st.button("➕ START NEW ESTIMATE", type="primary", use_container_width=True):
+        t = new_task()
+        st.session_state.tasks.append(t)
+        st.session_state.active_id = t["id"]
+        st.rerun()
+    st.subheader("Current Project")
+    st.session_state.project_name = st.text_input("Project Name", st.session_state.project_name)
+    st.session_state.estimator = st.text_input("Estimator", st.session_state.estimator)
+    st.write(f"Estimate items: **{len(st.session_state.tasks)}**")
     if st.session_state.tasks:
-        rows=[]
-        for i,x in enumerate(st.session_state.tasks,1):
-            t=calc_task(x); rows.append({'Line':i,'WBS':t['wbs'],'Category':t['category'],'Description':t['description'],'Qty':t['quantity'],'Unit':t['unit'],'BNI Hours':t['bni_hours'],'Labor':t['labor_cost'],'Equipment':t['equipment_cost'],'Materials':t['material_cost'],'Trucking':t['trucking_cost'],'Direct Cost':t['direct_cost'],'Total Bid Price':t['total_charge'],'Profit':t['profit']})
-        d=pd.DataFrame(rows); c=st.columns(5); c[0].metric('Direct Cost',f'${d["Direct Cost"].sum():,.2f}'); c[1].metric('Total Bid Price',f'${d["Total Bid Price"].sum():,.2f}'); c[2].metric('Profit',f'${d["Profit"].sum():,.2f}'); c[3].metric('BNI Hours',f'{d["BNI Hours"].sum():,.2f}'); c[4].metric('Scope Items',len(d)); st.dataframe(d,use_container_width=True,hide_index=True); st.subheader('Category Breakdown'); st.dataframe(d.groupby('Category',as_index=False)[['Labor','Equipment','Materials','Trucking','Direct Cost','Total Bid Price','Profit']].sum(),use_container_width=True,hide_index=True)
-    else: st.info('No scope items yet.')
+        rows = []
+        for i, x in enumerate(st.session_state.tasks, 1):
+            t = task_calc(x)
+            rows.append({
+                "Line": i, "Description": t["description"], "Qty": t["quantity"],
+                "Unit": t["unit"], "Cost": t["direct_cost"], "Charge": t["total_charge"], "Profit": t["profit"]
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-with ribbon[2]:
-    st.header('Cost Libraries / BNi'); tabs=st.tabs(['BNI Productivity','Labor','Equipment','Materials','Trucking','SQLite Library'])
-    with tabs[0]:
-        up=st.file_uploader('Upload / replace BNI productivity Excel',type=['xlsx']);
-        if up:
-            try: st.session_state.bni=load_bni(up); st.success(f'Loaded {len(st.session_state.bni):,} BNI records.')
-            except Exception as e: st.error(str(e))
-        if st.session_state.bni is not None: st.dataframe(st.session_state.bni.head(500),use_container_width=True,hide_index=True)
-    def lib_editor(typ):
-        d=rate_table(typ); 
-        if d.empty: d=pd.DataFrame(columns=['type','resource','unit','rate','notes','updated'])
-        e=st.data_editor(d,num_rows='dynamic',use_container_width=True,hide_index=True,key='lib_'+typ)
-        if st.button('💾 SAVE '+typ.upper()+' LIBRARY',key='save_'+typ,use_container_width=True):
-            for _,r in e.iterrows():
-                if str(r.get('resource','')).strip(): rate_save(typ,r['resource'],r.get('unit',''),r.get('rate',0),r.get('notes',''))
-            st.success('Library saved.'); st.rerun()
-    with tabs[1]: lib_editor('Labor')
-    with tabs[2]: lib_editor('Equipment')
-    with tabs[3]: lib_editor('Material')
-    with tabs[4]: lib_editor('Trucking')
-    with tabs[5]: st.dataframe(rate_table(),use_container_width=True,hide_index=True)
-
-with ribbon[3]:
-    st.header('Assumptions / Legacy Calc Formula Map')
-    c1,c2=st.columns(2); st.session_state.labor_sell=c1.number_input('Labor Sell Factor',1.,value=float(st.session_state.labor_sell),step=.01); st.session_state.equipment_sell=c2.number_input('Equipment Sell Factor',1.,value=float(st.session_state.equipment_sell),step=.01); st.session_state.material_tax=c1.number_input('Material Tax',0.,1.,value=float(st.session_state.material_tax),step=.01,format='%.1%%'); st.session_state.material_sell=c2.number_input('Material Sell Factor',1.,value=float(st.session_state.material_sell),step=.01); st.session_state.hauling_tax=c1.number_input('Hauling Tax',0.,1.,value=float(st.session_state.hauling_tax),step=.01,format='%.1%%'); st.session_state.hauling_sell=c2.number_input('Hauling Sell Factor',1.,value=float(st.session_state.hauling_sell),step=.01); st.session_state.hours_per_day=st.number_input('Hours / Workday',1.,value=float(st.session_state.hours_per_day),step=.5)
-    st.dataframe(pd.DataFrame([['Labor','Qty × Hours × Base Rate','Cost × 1.30'],['Equipment','Qty × Hours × Base Rate','Cost × 1.30'],['Material','(Qty × Rate) + Tax + Delivery','Cost × 1.09'],['Trucking','Qty × Rate × 1.07','Cost × 1.09'],['BNI','Scope Qty × BNI Manhr/Unit','Reference hours']],columns=['Type','Cost Formula','Sell / Result']),use_container_width=True,hide_index=True)
-
-with ribbon[4]:
-    st.header('Excel Export');
-    if not st.session_state.tasks: st.info('Create at least one scope item first.')
+with tabs[1]:
+    st.header("Estimate Builder")
+    if not st.session_state.tasks:
+        st.info("No estimate items yet. Go to Home and click START NEW ESTIMATE.")
     else:
-        st.write('Workbook contains Bid Summary, Estimate Detail, Legacy Calc, and Assumptions. Legacy Calc contains active Excel formulas and color-coded resource rows.')
-        st.download_button('📊 DOWNLOAD VERSION 7 EXCEL ESTIMATE',export_xlsx(),file_name=f'Civil_Estimate_V7_{datetime.now():%Y%m%d_%H%M}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',type='primary',use_container_width=True)
-        st.metric('Total Bid Price',f'${sum(calc_task(x)["total_charge"] for x in st.session_state.tasks):,.2f}')
+        st.sidebar.markdown("### 📂 Estimate Items")
+        for i, t in enumerate(st.session_state.tasks, 1):
+            if st.sidebar.button(f"{i}. {t['description']}"[:42], key=f"side_{t['id']}", use_container_width=True):
+                st.session_state.active_id = t["id"]
+                st.rerun()
+        t = active()
+        if t:
+            st.markdown('<div class="step">STEP 1 — DEFINE THE SCOPE</div>', unsafe_allow_html=True)
+            t["description"] = st.text_input("Scope of Work", t["description"], help='Example: Installation of 2,050 LF of 8" PVC Sanitary Line')
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                t["quantity"] = st.number_input("Quantity", min_value=0.0, value=float(t["quantity"]), step=1.0)
+            with c2:
+                units = ["LF", "SF", "CY", "TON", "EA", "HR", "LS"]
+                t["unit"] = st.selectbox("Unit", units, index=units.index(t["unit"]) if t["unit"] in units else 0)
+            with c3:
+                surfaces = ["Paved", "Unpaved", "Repaired"]
+                t["surface"] = st.selectbox("Surface", surfaces, index=surfaces.index(t["surface"]) if t["surface"] in surfaces else 0)
+            c1, c2 = st.columns(2)
+            with c1:
+                t["wbs"] = st.selectbox("MasterFormat / WBS", ["02 — Existing Conditions", "03 — Concrete", "31 — Earthwork", "32 — Exterior Improvements", "33 — Utilities"], index=4 if t["wbs"] == "33 — Utilities" else 0)
+            with c2:
+                t["depth"] = st.text_input("Average Depth", t["depth"], placeholder="Example: 0'-6'")
 
-st.caption('Civil Estimating Software V7 • BNI Productivity + Resource Unit Price Analysis + Legacy Calc + Excel Export')
+            st.markdown('<div class="step">STEP 2 — SELECT BNI PRODUCTIVITY</div>', unsafe_allow_html=True)
+            if st.session_state.bni is None:
+                st.warning("Go to 📚 Libraries → BNI Productivity and upload your BNI Excel database.")
+            else:
+                b = st.session_state.bni
+                q = st.text_input("Search BNI", placeholder="sanitary / PVC / sewer / excavation")
+                s = b.copy()
+                if q.strip():
+                    ql = q.lower().strip()
+                    s = s[s.Description.str.lower().str.contains(ql, na=False) | s["CSI Code"].str.lower().str.contains(ql, na=False) | s["Item Code"].str.lower().str.contains(ql, na=False)]
+                s = s[s["Manhr/Unit"].notna()].head(150)
+                if not s.empty:
+                    opts = {idx: f'{r.Description} | {r.Unit} | {r["Manhr/Unit"]:.4f} MH/{r.Unit} | Page {r.Page}' for idx, r in s.iterrows()}
+                    sel = st.selectbox("Choose BNI item", list(opts), format_func=lambda x: opts[x])
+                    br = b.loc[sel]
+                    t["bni_productivity"] = float(br["Manhr/Unit"])
+                    t["bni_page"] = str(br.Page)
+                    t["bni_description"] = str(br.Description)
+                    st.success(f'BNI productivity: {t["bni_productivity"]:.4f} MH/{t["unit"]} • Page {t["bni_page"]} • Total BNI hours: {t["quantity"]*t["bni_productivity"]:,.2f}')
+                    st.code(f'{t["quantity"]:,.2f} {t["unit"]} × {t["bni_productivity"]:.4f} MH/{t["unit"]} = {t["quantity"]*t["bni_productivity"]:,.2f} BNI man-hours')
+                else:
+                    st.info("No matching BNI item found.")
+
+            st.markdown('<div class="step">STEP 3 — ADD LABOR, EQUIPMENT, MATERIALS & TRUCKING</div>', unsafe_allow_html=True)
+            st.caption("Click + Add Row. Choose a type, type a resource name, and enter quantity/rate. Known library items automatically receive their unit, rate and tax.")
+            ed = st.data_editor(
+                t["resources"],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key=f"editor_{t['id']}",
+                column_config={
+                    "Type": st.column_config.SelectboxColumn("Type", options=["Labor", "Equipment", "Material", "Trucking"]),
+                    "Quantity": st.column_config.NumberColumn("Qty", min_value=0.0),
+                    "Rate": st.column_config.NumberColumn("Rate", format="$%.2f"),
+                    "Tax %": st.column_config.NumberColumn("Tax %", format="%.2f"),
+                    "Cost": st.column_config.NumberColumn("Cost", format="$%.2f", disabled=True),
+                    "Charge": st.column_config.NumberColumn("Charge", format="$%.2f", disabled=True),
+                    "Profit": st.column_config.NumberColumn("Profit", format="$%.2f", disabled=True)
+                }
+            )
+            ed = ed.copy()
+            for idx in ed.index:
+                typ = str(ed.at[idx, "Type"]).strip()
+                name = str(ed.at[idx, "Resource"]).strip()
+                if name:
+                    found = lookup(typ, name)
+                    if found is not None:
+                        if not str(ed.at[idx, "Unit"]).strip():
+                            ed.at[idx, "Unit"] = found.Unit
+                        if float(ed.at[idx, "Rate"] or 0) == 0:
+                            ed.at[idx, "Rate"] = float(found.Rate)
+                    if float(ed.at[idx, "Tax %"] or 0) == 0:
+                        ed.at[idx, "Tax %"] = st.session_state.material_tax if typ == "Material" else st.session_state.hauling_tax if typ == "Trucking" else 0.0
+                        
+            t["resources"] = calc(ed)
+            t = task_calc(t)
+
+            st.markdown('<div class="step">STEP 4 — REVIEW</div>', unsafe_allow_html=True)
+            cs = st.columns(7)
+            vals = [
+                ("BNI Hours", t["bni_hours"], False),
+                ("Labor", t["labor_cost"], True),
+                ("Materials", t["material_cost"], True),
+                ("Equipment", t["equipment_cost"], True),
+                ("Trucking", t["trucking_cost"], True),
+                ("Total Cost", t["direct_cost"], True),
+                ("Profit", t["profit"], True)
+            ]
+            for col, (lab, val, money) in zip(cs, vals):
+                col.metric(lab, f"${val:,.2f}" if money else f"{val:,.2f}")
+            st.markdown(f'<div class="total"><b>TOTAL CHARGE / BID VALUE</b><div style="font-size:28px;font-weight:700">${t["total_charge"]:,.2f}</div></div>', unsafe_allow_html=True)
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("💾 SAVE ITEM", type="primary", use_container_width=True):
+                    save(t)
+                    st.success("Estimate item saved.")
+            with c2:
+                if st.button("📋 DUPLICATE", use_container_width=True):
+                    cp = dict(t)
+                    cp["id"] = datetime.now().timestamp()
+                    cp["description"] += " — Copy"
+                    cp["resources"] = t["resources"].copy()
+                    st.session_state.tasks.append(cp)
+                    st.session_state.active_id = cp["id"]
+                    st.rerun()
+            with c3:
+                if st.button("🗑️ DELETE", use_container_width=True):
+                    st.session_state.tasks = [x for x in st.session_state.tasks if x["id"] != t["id"]]
+                    st.session_state.active_id = st.session_state.tasks[0]["id"] if st.session_state.tasks else None
+                    st.rerun()
+
+with tabs[2]:
+    st.header("📚 Libraries")
+    lt = st.tabs(["BNI Productivity", "Labor", "Materials", "Equipment", "Trucking", "Settings"])
+    with lt[0]:
+        up = st.file_uploader("Upload BNI Excel database", type=["xlsx"], help="Required columns: CSI Code, Item Code, Description, Unit, Manhr/Unit, Page.")
+        if up:
+            try:
+                st.session_state.bni = load_bni(up)
+                st.success(f"Loaded {len(st.session_state.bni):,} BNI records.")
+            except Exception as e:
+                st.error(str(e))
+        if st.session_state.bni is None and DB_DEFAULT.exists():
+            try:
+                st.session_state.bni = load_bni(DB_DEFAULT)
+            except Exception:
+                pass
+        if st.session_state.bni is not None:
+            st.dataframe(st.session_state.bni.head(200), use_container_width=True, hide_index=True)
+    with lt[1]:
+        st.session_state.labor = st.data_editor(st.session_state.labor, num_rows="dynamic", use_container_width=True, hide_index=True, key="lib_labor")
+    with lt[2]:
+        st.session_state.materials = st.data_editor(st.session_state.materials, num_rows="dynamic", use_container_width=True, hide_index=True, key="lib_material")
+    with lt[3]:
+        st.session_state.equipment = st.data_editor(st.session_state.equipment, num_rows="dynamic", use_container_width=True, hide_index=True, key="lib_equipment")
+    with lt[4]:
+        st.session_state.trucking = st.data_editor(st.session_state.trucking, num_rows="dynamic", use_container_width=True, hide_index=True, key="lib_trucking")
+    with lt[5]:
+        st.subheader("Global Multipliers & Working Hours")
+        c1, c2 = st.columns(2)[cite: 1]
+
+        st.session_state.labor_sell = c1.number_input(
+            "Labor Sell Factor",
+            min_value=1.0,
+            value=float(st.session_state.labor_sell),
+            step=0.01,
+            format="%.2f"
+        )[cite: 1]
+
+        st.session_state.equipment_sell = c2.number_input(
+            "Equipment Sell Factor",
+            min_value=1.0,
+            value=float(st.session_state.equipment_sell),
+            step=0.01,
+            format="%.2f"
+        )[cite: 1]
+
+        st.session_state.material_tax = c1.number_input(
+            "Material Tax (Decimal e.g., 0.09)",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(st.session_state.material_tax),
+            step=0.01,
+            format="%.2f"
+        )[cite: 1]
+
+        st.session_state.material_sell = c2.number_input(
+            "Material Sell Factor",
+            min_value=1.0,
+            value=float(st.session_state.material_sell),
+            step=0.01,
+            format="%.2f"
+        )[cite: 1]
+
+        st.session_state.hauling_tax = c1.number_input(
+            "Hauling Tax (Decimal e.g., 0.07)",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(st.session_state.hauling_tax),
+            step=0.01,
+            format="%.2f"
+        )[cite: 1]
+
+        st.session_state.hauling_sell = c2.number_input(
+            "Hauling Sell Factor",
+            min_value=1.0,
+            value=float(st.session_state.hauling_sell),
+            step=0.01,
+            format="%.2f"
+        )[cite: 1]
+
+        st.session_state.hours_per_day = st.number_input(
+            "Hours / Workday",
+            min_value=1.0,
+            value=float(st.session_state.hours_per_day),
+            step=0.5,
+            format="%.1f"
+        )[cite: 1]
+
+with tabs[3]:
+    st.header("📊 Reports")
+    if not st.session_state.tasks:
+        st.info("No saved estimate items.")
+    else:
+        rows = []
+        for i, x in enumerate(st.session_state.tasks, 1):
+            t = task_calc(x)
+            rows.append({
+                "Line": i, "WBS": t["wbs"], "Description": t["description"],
+                "Qty": t["quantity"], "Unit": t["unit"], "BNI Hours": t["bni_hours"],
+                "Labor": t["labor_cost"], "Materials": t["material_cost"],
+                "Equipment": t["equipment_cost"], "Trucking": t["trucking_cost"],
+                "Direct Cost": t["direct_cost"], "Charge": t["total_charge"], "Profit": t["profit"]
+            })
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        c = st.columns(4)
+        c[0].metric("BNI Hours", f'{df["BNI Hours"].sum():,.2f}')
+        c[1].metric("Direct Cost", f'${df["Direct Cost"].sum():,.2f}')
+        c[2].metric("Charge", f'${df["Charge"].sum():,.2f}')
+        c[3].metric("Profit", f'${df["Profit"].sum():,.2f}')
+
+with tabs[4]:
+    st.header("📤 Export")
+    if not st.session_state.tasks:
+        st.info("Create and save an estimate item first.")
+    else:
+        st.write("Excel includes Estimate Summary, Resource Breakdown, BNI Productivity, Settings and price-list sheets.")
+        st.download_button(
+            "📊 DOWNLOAD EXCEL ESTIMATE",
+            export_xlsx(),
+            file_name=f'Civil_Estimate_{datetime.now():%Y%m%d_%H%M}.xlsx',
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
+
+with st.sidebar:
+    st.markdown("### 🏗️ Quick Start")
+    if st.button("➕ New Estimate Item", use_container_width=True):
+        t = new_task()
+        st.session_state.tasks.append(t)
+        st.session_state.active_id = t["id"]
+        st.rerun()
+    st.divider()
+    st.markdown("**Estimate Items**")
+    if not st.session_state.tasks:
+        st.caption("None yet.")
+    for i, t in enumerate(st.session_state.tasks, 1):
+        if st.button(f"{i}. {t['description']}"[:40], key=f"quick_{t['id']}", use_container_width=True):
+            st.session_state.active_id = t["id"]
+            st.rerun()
+    st.divider()
+    st.caption("Version 8.3 • Clean Build")
